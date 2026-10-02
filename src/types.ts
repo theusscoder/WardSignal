@@ -1,4 +1,5 @@
 export type State = 'stable' | 'review' | 'stale' | 'urgent'
+export type Scenario = 'rising' | 'stable' | 'missing' | 'unacknowledged'
 export type DemoPerson = { id: string; name: string; role: string }
 export type Observation = {
   id?: number
@@ -31,6 +32,7 @@ export type Alert = {
   score: number
   reason: string
   created_at: string
+  assigned_at?: string
   acknowledged_at: string | null
   escalated_at: string | null
 }
@@ -48,7 +50,7 @@ export type Patient = {
   trend: { value: number | null; observed_at: string; quality: string }[]
   risk_estimate: { value: number; target: string; horizon: string; label: string; contributors: string[] }
   alert: Alert | null
-  scenario: 'rising' | 'stable' | 'missing' | 'unacknowledged'
+  scenario: Scenario
 }
 export type Queue = {
   ward: string

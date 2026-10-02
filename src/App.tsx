@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert as MuiAlert, Avatar, Badge, Button, ButtonBase, Card, CardContent,
   Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle,
@@ -23,33 +23,16 @@ import SensorsOff from '@mui/icons-material/SensorsOff'
 import SwapHoriz from '@mui/icons-material/SwapHoriz'
 import TrendingUp from '@mui/icons-material/TrendingUp'
 import WarningAmber from '@mui/icons-material/WarningAmber'
-import type { Alert, AuditEvent, Notification, Observation, Patient, Queue, State, Timeline } from './types'
+import type { Alert, AuditEvent, Notification, Observation, Patient, Queue, Scenario, State, Timeline } from './types'
+import { acknowledgeAlert, loadDemoState, markNotificationRead, processEscalations, reassignAlert, replayScenario, saveDemoState, toQueue, type DemoState } from './demo-store'
 
-const API = import.meta.env.VITE_API_URL || '/api'
 const SCENARIOS = [
   { id: 'rising', title: 'Rising concerning trend', description: 'Advance vitals toward the prototype review thresholds.' },
   { id: 'stable', title: 'Stable patient', description: 'Add a stable set of recorded observations.' },
   { id: 'missing', title: 'Missing reading', description: 'Record an unavailable SpO₂ sample and show a chart gap.' },
   { id: 'unacknowledged', title: 'Unacknowledged alert', description: 'Advance the episode and route an open alert to the owner.' },
 ] as const
-type Scenario = typeof SCENARIOS[number]['id']
 type Filter = 'all' | 'urgent' | 'review' | 'stale' | 'stable'
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-  })
-  const contentType = response.headers.get('content-type') || ''
-  const body = contentType.toLowerCase().includes('application/json')
-    ? await response.json().catch(() => null)
-    : null
-  if (!response.ok) throw new Error(body?.detail || `Request failed (${response.status})`)
-  if (body === null) {
-    throw new Error('The WardSignal API is not connected. Set VITE_API_URL to the deployed FastAPI URL ending in /api, then redeploy.')
-  }
-  return body as T
-}
 
 const statusMeta: Record<State, { label: string; color: 'success' | 'warning' | 'error' | 'default'; Icon: typeof CheckCircleOutline }> = {
   stable: { label: 'Stable', color: 'success', Icon: CheckCircleOutline },
@@ -230,7 +213,7 @@ function ReplayDialog({ open, onClose, patients, patientId, onReplay }: { open: 
       <FormControl fullWidth size="small" className="dialog-field"><label className="field-label">Patient</label><Select value={target} onChange={e => setTarget(e.target.value)}>{patients.map(p => <MenuItem key={p.patient_id} value={p.patient_id}>{p.name} · {p.bed}</MenuItem>)}</Select></FormControl>
       <FormControl fullWidth size="small" className="dialog-field"><label className="field-label">Scenario</label><Select value={scenario} onChange={e => setScenario(e.target.value as Scenario)}>{SCENARIOS.map(s => <MenuItem key={s.id} value={s.id}>{s.title}</MenuItem>)}</Select></FormControl>
       <div className="scenario-hint"><Replay fontSize="small" /><span>{SCENARIOS.find(s => s.id === scenario)?.description}</span></div>
-      {selected && <div className="replay-target"><PersonOutline fontSize="small" /><span>Patient and encounter will be validated by the demo API.</span></div>}
+      {selected && <div className="replay-target"><PersonOutline fontSize="small" /><span>Synthetic encounter selected · runs entirely in this browser.</span></div>}
     </DialogContent><DialogActions className="dialog-actions"><Button color="inherit" onClick={onClose}>Cancel</Button><Button variant="contained" startIcon={running ? <CircularProgress size={15} color="inherit" /> : <Replay />} disabled={running || !target} onClick={async () => { setRunning(true); try { await onReplay(target, scenario); onClose() } finally { setRunning(false) } }}>Replay scenario</Button></DialogActions></Dialog>
 }
 
@@ -306,57 +289,26 @@ function PatientProfile({ patient, timeline, onBack, onReplay, onAcknowledge, on
 }
 
 export default function App() {
-  const [queue, setQueue] = useState<Queue | null>(null)
+  const [demoState, setDemoState] = useState<DemoState>(() => loadDemoState())
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [timeline, setTimeline] = useState<Timeline | null>(null)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [replayOpen, setReplayOpen] = useState(false)
   const [toast, setToast] = useState('')
-  const [notifications, setNotifications] = useState<Notification[]>([])
   const [notificationAnchor, setNotificationAnchor] = useState<HTMLElement | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
-  const selected = queue?.patients.find(p => p.patient_id === selectedId) || null
+  const queue: Queue = useMemo(() => toQueue(demoState), [demoState])
+  const notifications = demoState.notifications
+  const timeline = selectedId ? demoState.timelines[selectedId] || null : null
+  const selected = queue.patients.find(p => p.patient_id === selectedId) || null
 
-  const refresh = useCallback(async (initial = false) => {
-    try {
-      const [nextQueue, nextNotifications] = await Promise.all([
-        request<Queue>('/ward/queue'), request<Notification[]>('/notifications'),
-      ])
-      setQueue(nextQueue)
-      setNotifications(nextNotifications)
-      setError('')
-      if (initial) setLoading(false)
-      return nextQueue
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not reach the WardSignal demo service.')
-      if (initial) setLoading(false)
-      throw e
-    }
-  }, [])
-
-  const refreshProfile = useCallback(async (patientId: string) => {
-    const [patient, nextTimeline] = await Promise.all([
-      request<Patient>(`/patients/${patientId}`), request<Timeline>(`/patients/${patientId}/timeline`),
-    ])
-    setQueue(previous => previous ? { ...previous, patients: previous.patients.map(p => p.patient_id === patientId ? patient : p) } : previous)
-    setTimeline(nextTimeline)
-  }, [])
-
-  useEffect(() => { void refresh(true) }, [refresh])
+  useEffect(() => { saveDemoState(demoState) }, [demoState])
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      void refresh().then(async () => { if (selectedId) await refreshProfile(selectedId) }).catch(() => undefined)
-    }, 6000)
+    setDemoState(previous => processEscalations(previous))
+    const interval = window.setInterval(() => setDemoState(previous => processEscalations(previous)), 1000)
     return () => window.clearInterval(interval)
-  }, [refresh, refreshProfile, selectedId])
-  useEffect(() => {
-    if (!selectedId) { setTimeline(null); return }
-    void refreshProfile(selectedId).catch(e => setError(e instanceof Error ? e.message : 'Could not load patient profile.'))
-  }, [selectedId, refreshProfile])
+  }, [])
 
   const visiblePatients = useMemo(() => (queue?.patients || []).filter(patient => {
     const term = search.trim().toLocaleLowerCase()
@@ -365,13 +317,11 @@ export default function App() {
   }), [queue, search, filter])
 
   const replay = async (patientId: string, scenario: Scenario) => {
-    const patient = queue?.patients.find(p => p.patient_id === patientId)
+    const patient = queue.patients.find(p => p.patient_id === patientId)
     if (!patient) return
     setBusy(true)
     try {
-      await request('/scenarios/replay', { method: 'POST', body: JSON.stringify({ patient_id: patient.patient_id, encounter_id: patient.encounter_id, scenario }) })
-      await refresh()
-      if (selectedId === patientId) await refreshProfile(patientId)
+      setDemoState(previous => replayScenario(previous, patient.patient_id, patient.encounter_id, scenario))
       setToast(`${SCENARIOS.find(s => s.id === scenario)?.title} replayed for ${patient.name}`)
     } catch (e) { setToast(e instanceof Error ? e.message : 'Replay failed.') }
     finally { setBusy(false) }
@@ -380,9 +330,7 @@ export default function App() {
   const acknowledge = async (alert: Alert) => {
     setActionBusy(true)
     try {
-      await request(`/alerts/${alert.id}/acknowledge`, { method: 'POST', body: JSON.stringify({ actor_id: queue?.on_duty.id }) })
-      if (selectedId) await refreshProfile(selectedId)
-      await refresh()
+      setDemoState(previous => acknowledgeAlert(previous, alert.id, queue.on_duty.id))
       setToast('Alert acknowledged and added to audit history.')
     } catch (e) { setToast(e instanceof Error ? e.message : 'Could not acknowledge this alert.') }
     finally { setActionBusy(false) }
@@ -391,16 +339,14 @@ export default function App() {
   const reassign = async (alert: Alert, ownerId: string) => {
     setActionBusy(true)
     try {
-      await request(`/alerts/${alert.id}/reassign`, { method: 'POST', body: JSON.stringify({ actor_id: queue?.on_duty.id, owner_id: ownerId }) })
-      if (selectedId) await refreshProfile(selectedId)
-      await refresh()
+      setDemoState(previous => reassignAlert(previous, alert.id, ownerId, queue.on_duty.id))
       setToast('Alert reassigned and the new owner was notified.')
     } catch (e) { setToast(e instanceof Error ? e.message : 'Could not reassign this alert.') }
     finally { setActionBusy(false) }
   }
 
   const chooseNotification = async (notification: Notification) => {
-    try { await request(`/notifications/${notification.id}/read`, { method: 'POST' }); await refresh() } catch { /* the profile remains available even if read-state sync fails */ }
+    setDemoState(previous => markNotificationRead(previous, notification.id))
     setNotificationAnchor(null)
     setSelectedId(notification.patient_id)
   }
@@ -409,27 +355,24 @@ export default function App() {
   return <div className="app-shell">
     <aside className="left-rail" aria-label="Primary navigation"><div className="brand-mark"><MonitorHeart /></div><div className="rail-divider" /><Tooltip title="Patients" placement="right"><button className="rail-active" aria-label="Patients" onClick={() => setSelectedId(null)}><PersonOutline /></button></Tooltip><div className="rail-spacer" /><span className="rail-synthetic">S</span></aside>
     <div className="app-main">
-      <header className="topbar"><div className="mobile-brand"><div className="brand-mark small"><MonitorHeart /></div><b>WardSignal</b></div><div className="topbar-left"><div className="wordmark">WardSignal</div><span className="topbar-divider" /><div className="ward-context"><span className="context-label">DEMO WARD</span><b>{queue?.ward || 'North · Medical 3'}</b></div><span className="topbar-divider context-divider" /><div className="shift-context"><span className="context-label">SHIFT</span><b>{queue?.shift || 'Day shift · 07:00–19:00'}</b></div></div>
-        <div className="topbar-right"><Chip className="demo-chip" label="Synthetic data" size="small" /><Tooltip title={`${unread} unread demo notification${unread === 1 ? '' : 's'}`}><IconButton className="notification-button" aria-label={`Notifications, ${unread} unread`} onClick={e => setNotificationAnchor(e.currentTarget)}><Badge badgeContent={unread} color="error" max={9}><NotificationsNone /></Badge></IconButton></Tooltip><div className="topbar-user"><Avatar className="user-avatar">AS</Avatar><div><b>Dr. Ananya Sen</b><span>Demo clinician</span></div></div></div>
+      <header className="topbar"><div className="mobile-brand"><div className="brand-mark small"><MonitorHeart /></div><b>WardSignal</b></div><div className="topbar-left"><div className="wordmark">WardSignal</div><span className="topbar-divider" /><div className="ward-context"><span className="context-label">DEMO WARD</span><b>{queue.ward}</b></div><span className="topbar-divider context-divider" /><div className="shift-context"><span className="context-label">SHIFT</span><b>{queue.shift}</b></div></div>
+        <div className="topbar-right"><Chip className="demo-chip" label="Browser-only demo" size="small" /><Tooltip title={`${unread} unread demo notification${unread === 1 ? '' : 's'}`}><IconButton className="notification-button" aria-label={`Notifications, ${unread} unread`} onClick={e => setNotificationAnchor(e.currentTarget)}><Badge badgeContent={unread} color="error" max={9}><NotificationsNone /></Badge></IconButton></Tooltip><div className="topbar-user"><Avatar className="user-avatar">AS</Avatar><div><b>Dr. Ananya Sen</b><span>Demo clinician</span></div></div></div>
       </header>
       <Popover open={Boolean(notificationAnchor)} anchorEl={notificationAnchor} onClose={() => setNotificationAnchor(null)} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}><div className="notification-popover"><div className="notification-popover-head"><b>Notifications</b><span>{unread} unread</span></div>{notifications.length ? notifications.slice(0, 6).map(n => <button className={`notification-item ${n.read ? '' : 'unread'}`} key={n.id} onClick={() => void chooseNotification(n)}><span className="notification-icon"><ErrorOutline fontSize="small" /></span><span><b>{n.patient_name} · {n.demo_id}</b><small>{n.recipient.name} · {when(n.created_at)}</small></span><ChevronRight fontSize="small" /></button>) : <div className="empty-inline">No notifications.</div>}</div></Popover>
       <main className="workspace">
-        {error && <MuiAlert className="service-alert" severity="error" action={<Button color="inherit" size="small" onClick={() => void refresh(true)}>Retry</Button>}>Could not load live demo data: {error}</MuiAlert>}
-        {loading && !queue ? <div className="loading-state"><CircularProgress size={25} /><span>Connecting to the synthetic ward feed…</span></div> : !queue ? <Card className="unavailable-card"><InfoOutlined color="warning" /><Typography variant="h3">The ward service isn’t available</Typography><Typography color="text.secondary">Start the local API and retry to load the synthetic patient queue.</Typography><Button variant="contained" onClick={() => void refresh(true)}>Retry connection</Button></Card> : <>
           {!selected ? <>
             <div className="page-heading"><div><div className="eyebrow page-eyebrow"><span className="live-dot" /> Ward workspace</div><Typography component="h1" variant="h1">Ward overview</Typography><p>Review recent observations and see who owns the next action.</p></div><Button variant="contained" startIcon={<Replay />} onClick={() => setReplayOpen(true)}>Replay scenario</Button></div>
-            <div className="summary-grid"><SummaryItem label="Patients on ward" value={queue.patients.length} foot="Synthetic demo encounters" tone="teal" icon={<PersonOutline />} /><SummaryItem label="Need review" value={queue.review_count} foot="Urgent, changing or stale" tone="amber" icon={<WarningAmber />} /><SummaryItem label="Open alerts" value={queue.urgent_count} foot="Awaiting acknowledgement" tone="coral" icon={<ErrorOutline />} /><SummaryItem label="Queue sync" value="Connected" foot={`Refreshed ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date())}`} tone="blue" icon={<AccessTime />} /></div>
+            <div className="summary-grid"><SummaryItem label="Patients on ward" value={queue.patients.length} foot="Synthetic demo encounters" tone="teal" icon={<PersonOutline />} /><SummaryItem label="Need review" value={queue.review_count} foot="Urgent, changing or stale" tone="amber" icon={<WarningAmber />} /><SummaryItem label="Open alerts" value={queue.urgent_count} foot="Awaiting acknowledgement" tone="coral" icon={<ErrorOutline />} /><SummaryItem label="Demo mode" value="Local" foot="Saved in this browser" tone="blue" icon={<AccessTime />} /></div>
             <div className="overview-layout"><Card className="patient-list-card"><div className="list-head"><div><div className="list-title"><Typography variant="h2">Patients</Typography><Chip label={`${visiblePatients.length} shown`} size="small" variant="outlined" /></div><span>Latest recorded observations · select a patient to review the signal story</span></div><div className="list-controls"><TextField size="small" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search patients" inputProps={{ 'aria-label': 'Search patients' }} InputProps={{ startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment> }} /><FormControl size="small" className="filter-select"><Select value={filter} onChange={e => setFilter(e.target.value as Filter)} aria-label="Filter patients by status"><MenuItem value="all">All states</MenuItem><MenuItem value="urgent">Open alert</MenuItem><MenuItem value="review">Review trend</MenuItem><MenuItem value="stale">Stale data</MenuItem><MenuItem value="stable">Stable</MenuItem></Select></FormControl></div></div>
               <div className="patient-table-head"><span>Patient / bed</span><span>Current state</span><span>Latest observations</span><span>Trend</span><span>Last update</span><span>Review owner</span></div>
               <div className="patient-rows">{visiblePatients.map(patient => <PatientRow key={patient.patient_id} patient={patient} onOpen={() => setSelectedId(patient.patient_id)} />)}{!visiblePatients.length && <div className="empty-list"><Search /><b>No patients match this view</b><span>Try another search or status filter.</span><Button size="small" onClick={() => { setSearch(''); setFilter('all') }}>Clear filters</Button></div>}</div>
               <div className="list-foot"><span><span className="legend-dot status-stable-dot" /> Stable</span><span><span className="legend-dot status-review-dot" /> Review trend</span><span><span className="legend-dot status-stale-dot" /> Stale / missing</span><span><span className="legend-dot status-urgent-dot" /> Open alert</span><span className="synthetic-foot"><InfoOutlined fontSize="inherit" /> All listed data is synthetic</span></div>
             </Card><aside className="overview-aside"><Card className="attention-card"><CardContent><div className="panel-heading"><div><div className="eyebrow">Needs a look</div><Typography variant="h3">Attention queue</Typography></div><span className="attention-count">{queue.review_count}</span></div><div className="attention-list">{queue.patients.filter(p => p.state !== 'stable').map(patient => <button key={patient.patient_id} className="attention-item" onClick={() => setSelectedId(patient.patient_id)}><span className={`attention-marker ${patient.state}`} /><span><b>{patient.name}</b><small>{patient.demo_id} · {patient.bed}</small></span><StateChip state={patient.state} /><ChevronRight fontSize="small" /></button>)}{!queue.review_count && <p className="muted-small">No patients currently need review.</p>}</div></CardContent></Card><Card className="shift-card"><CardContent><div className="eyebrow">Simulated shift roster</div><Typography variant="h3">Review ownership</Typography><div className="roster-person"><Avatar className="roster-avatar">AS</Avatar><div><b>{queue.on_duty.name}</b><span>On duty · 07:00–19:00</span></div><span className="on-duty-dot" /></div><div className="roster-person"><Avatar className="roster-avatar backup-avatar">RI</Avatar><div><b>{queue.backup.name}</b><span>Backup clinician</span></div><span className="backup-pill">Backup</span></div><Divider className="roster-divider" /><div className="timeout-note"><AccessTime fontSize="small" /><span>Open alerts route to the backup after <b>90 seconds</b> without acknowledgement.</span></div></CardContent></Card><div className="prototype-note"><InfoOutlined fontSize="small" /><span>WardSignal is a demo decision-support prototype. Risk thresholds are deterministic examples, not a validated clinical model.</span></div></aside></div>
           </> : <PatientProfile patient={selected} timeline={timeline} onBack={() => setSelectedId(null)} onReplay={() => setReplayOpen(true)} onAcknowledge={a => void acknowledge(a)} onReassign={(a, ownerId) => void reassign(a, ownerId)} actionBusy={actionBusy} />}
-          <footer className="app-footer"><span>WardSignal · early-warning prototype</span><span><span className="footer-live-dot" /> Demo feed polling every 6 sec <span className="footer-separator">·</span> All data synthetic</span></footer>
-        </>}
+          <footer className="app-footer"><span>WardSignal · early-warning prototype</span><span><span className="footer-live-dot" /> Runs in this browser <span className="footer-separator">·</span> All data synthetic</span></footer>
       </main>
     </div>
-    {queue && <ReplayDialog open={replayOpen} onClose={() => setReplayOpen(false)} patients={queue.patients} patientId={selectedId || ''} onReplay={replay} />}
+    <ReplayDialog open={replayOpen} onClose={() => setReplayOpen(false)} patients={queue.patients} patientId={selectedId || ''} onReplay={replay} />
     <Snackbar open={Boolean(toast)} autoHideDuration={4600} onClose={() => setToast('')} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}><MuiAlert severity="success" variant="filled" onClose={() => setToast('')} sx={{ width: '100%' }}>{toast}</MuiAlert></Snackbar>
     <Snackbar open={busy} anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}><MuiAlert severity="info" variant="outlined" icon={<CircularProgress size={16} />}>Advancing the synthetic observations…</MuiAlert></Snackbar>
   </div>
