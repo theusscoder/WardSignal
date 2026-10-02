@@ -40,8 +40,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`)
+  const contentType = response.headers.get('content-type') || ''
+  const body = contentType.toLowerCase().includes('application/json')
+    ? await response.json().catch(() => null)
+    : null
+  if (!response.ok) throw new Error(body?.detail || `Request failed (${response.status})`)
+  if (body === null) {
+    throw new Error('The WardSignal API is not connected. Set VITE_API_URL to the deployed FastAPI URL ending in /api, then redeploy.')
+  }
   return body as T
 }
 
