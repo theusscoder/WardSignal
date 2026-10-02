@@ -1,0 +1,17 @@
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.tsbuildinfo
+.venv/
+wardsignal.db
+.env*
+!.env.example
+.vercel/
+work/
+*.db
+*.sqlite
+*.sqlite3
